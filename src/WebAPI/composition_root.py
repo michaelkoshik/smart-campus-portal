@@ -1,53 +1,87 @@
-﻿from src.Application.use_cases import CreateOnlineTestUseCase
-from src.Domain.ports import IAuditEventPublisher, IOnlineTestRepository
-from src.Infrastructure.audit_publisher import StructuredAuditEventPublisher
+﻿from src.Application.ports import IEventPublisher
+from src.Application.use_cases import CreateOnlineTestUseCase
+from src.Domain.ports import IOnlineTestRepository
+from src.Events.domain_events import OnlineTestCreatedEvent
+from src.Infrastructure.consumers import (
+    GradebookSlotConsumer,
+    InMemoryProcessedEventStore,
+    NotificationDispatchConsumer,
+)
+from src.Infrastructure.event_bus_adapter import EventBusPublisherAdapter
 from src.Infrastructure.repositories import InMemoryOnlineTestRepository
-from src.WebAPI.controllers import OnlineTestController
+from src.Messaging.event_bus import AsyncInMemoryEventBus, IEventBus
 from src.WebAPI.di_container import DIContainer, Lifetime
 
 
 def build_composition_root() -> DIContainer:
     """
-    Композиційний корінь (Composition Root).
-    Єдине місце в застосунку, де поєднуються абстракції та конкретні реалізації.
+    Композиційний корінь (Composition Root) для ЛР №5 (EDA).
+    Реєструє репозиторій, асинхронну шину подій, порт видавця, сховище ідемпотентності та споживачів.
     """
     container = DIContainer()
+    shared_logs: list[str] = []
 
-    # 1. Singleton: Сховище In-Memory (або пул підключень/шина подій) без стану конкретного запиту.
-    # Обрано Singleton, оскільки об'єкт не зберігає контекст поточного HTTP-запиту і має жити весь час роботи процесу.
+    # Singleton: Спільний журнал логів демонстрації
+    container.register(list, factory=lambda _: shared_logs, lifetime=Lifetime.SINGLETON)
+
+    # Singleton: Репозиторій тестів у пам'яті
     container.register(
         IOnlineTestRepository,
         factory=lambda _: InMemoryOnlineTestRepository(),
         lifetime=Lifetime.SINGLETON,
     )
 
-    # 2. Singleton: Публікатор подій аудиту (stateless адаптер черги повідомлень).
-    # Обрано Singleton, щоб не перестворювати клієнт брокера на кожен виклик.
+    # Singleton: Сховище оброблених EventId (для гарантії ідемпотентності споживачів)
     container.register(
-        IAuditEventPublisher,
-        factory=lambda _: StructuredAuditEventPublisher(),
+        InMemoryProcessedEventStore,
+        factory=lambda _: InMemoryProcessedEventStore(),
         lifetime=Lifetime.SINGLETON,
     )
 
-    # 3. Scoped: Сценарій використання CreateOnlineTestUseCase.
-    # Обрано Scoped (один екземпляр на межі одного запиту/Unit of Work), щоб ізолювати контекст виконання запиту.
+    # Singleton: Незалежні споживачі подій
     container.register(
-        CreateOnlineTestUseCase,
-        factory=lambda scope: CreateOnlineTestUseCase(
-            test_repository=scope.resolve(IOnlineTestRepository),
-            audit_publisher=scope.resolve(IAuditEventPublisher),
+        GradebookSlotConsumer,
+        factory=lambda s: GradebookSlotConsumer(
+            processed_store=s.resolve(InMemoryProcessedEventStore),
+            logs=s.resolve(list),
         ),
-        lifetime=Lifetime.SCOPED,
+        lifetime=Lifetime.SINGLETON,
+    )
+    container.register(
+        NotificationDispatchConsumer,
+        factory=lambda s: NotificationDispatchConsumer(
+            processed_store=s.resolve(InMemoryProcessedEventStore),
+            logs=s.resolve(list),
+        ),
+        lifetime=Lifetime.SINGLETON,
     )
 
-    # 4. Transient: Тонкий контролер OnlineTestController.
-    # Обрано Transient (новий екземпляр на кожне звернення), оскільки контролер не має власного стану між запитами.
+    # Singleton: Асинхронна In-Memory шина подій із підпискою двох незалежних споживачів
+    def create_bus(scope) -> IEventBus:
+        bus = AsyncInMemoryEventBus(logs=scope.resolve(list))
+        gradebook_consumer = scope.resolve(GradebookSlotConsumer)
+        notif_consumer = scope.resolve(NotificationDispatchConsumer)
+        bus.subscribe(OnlineTestCreatedEvent, gradebook_consumer.handle)
+        bus.subscribe(OnlineTestCreatedEvent, notif_consumer.handle)
+        return bus
+
+    container.register(IEventBus, factory=create_bus, lifetime=Lifetime.SINGLETON)
+
+    # Singleton: Адаптер порту IEventPublisher поверх шини подій
     container.register(
-        OnlineTestController,
-        factory=lambda scope: OnlineTestController(
-            create_use_case=scope.resolve(CreateOnlineTestUseCase),
+        IEventPublisher,
+        factory=lambda s: EventBusPublisherAdapter(event_bus=s.resolve(IEventBus)),
+        lifetime=Lifetime.SINGLETON,
+    )
+
+    # Scoped: Сценарій використання CreateOnlineTestUseCase
+    container.register(
+        CreateOnlineTestUseCase,
+        factory=lambda s: CreateOnlineTestUseCase(
+            test_repository=s.resolve(IOnlineTestRepository),
+            event_publisher=s.resolve(IEventPublisher),
         ),
-        lifetime=Lifetime.TRANSIENT,
+        lifetime=Lifetime.SCOPED,
     )
 
     return container

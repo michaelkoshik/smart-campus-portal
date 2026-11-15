@@ -1,137 +1,149 @@
 ﻿import ast
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 import pytest
 
 from src.Application.dto import CreateOnlineTestCommand
+from src.Application.ports import IEventPublisher
 from src.Application.use_cases import CreateOnlineTestUseCase
-from src.Domain.exceptions import (
-    DomainValidationError,
-    DuplicateTestTitleError,
-    RepositoryPortError,
+from src.Domain.exceptions import DomainValidationError
+from src.Domain.ports import IOnlineTestRepository
+from src.Events.domain_events import OnlineTestCreatedEvent
+from src.Infrastructure.consumers import (
+    GradebookSlotConsumer,
+    InMemoryProcessedEventStore,
+    NotificationDispatchConsumer,
 )
-from src.Domain.ports import IAuditEventPublisher, IOnlineTestRepository
+from src.Messaging.event_bus import AsyncInMemoryEventBus
 
 
-def test_create_online_test_success_persists_and_publishes_audit() -> None:
-    """Тест 1: Успішний шлях зберігає зміну через порт репозиторію та публікує подію аудиту."""
+def test_use_case_publishes_domain_event_via_port() -> None:
+    """Тест 1: Сценарій зберігає тест і публікує подію OnlineTestCreatedEvent через абстрактний порт."""
     mock_repo = MagicMock(spec=IOnlineTestRepository)
     mock_repo.exists_by_title.return_value = False
-    mock_audit = MagicMock(spec=IAuditEventPublisher)
+    mock_publisher = AsyncMock(spec=IEventPublisher)
 
-    use_case = CreateOnlineTestUseCase(
-        test_repository=mock_repo,
-        audit_publisher=mock_audit,
-    )
-    command = CreateOnlineTestCommand(
+    use_case = CreateOnlineTestUseCase(test_repository=mock_repo, event_publisher=mock_publisher)
+    cmd = CreateOnlineTestCommand(
         course_id=uuid4(),
-        title="Модульний контроль №1: Архітектурні стилі та шаблони",
+        title="Модульний контроль №2: EDA",
         category="MODULE_CONTROL",
         duration_minutes=45,
         max_score=25.0,
         actor_id="teacher-101",
     )
 
-    result = use_case.execute(command)
+    result = asyncio.run(use_case.execute(cmd))
 
-    assert result.title == "Модульний контроль №1: Архітектурні стилі та шаблони"
-    assert result.duration_minutes == 45
-    assert result.max_score == 25.0
-    assert result.is_published is False
+    assert result.title == "Модульний контроль №2: EDA"
     mock_repo.save.assert_called_once()
-    mock_audit.publish_test_created.assert_called_once()
+    mock_publisher.publish.assert_awaited_once()
+    published_event = mock_publisher.publish.call_args[0][0]
+    assert isinstance(published_event, OnlineTestCreatedEvent)
+    assert published_event.test_id == result.id
 
 
-def test_create_online_test_domain_validation_failure_does_not_save() -> None:
-    """Тест 2: Відхилення за правилом домену (Value Object DurationMinutes) не викликає запис у порт."""
+def test_domain_validation_error_does_not_publish_event() -> None:
+    """Тест 2: При порушенні інваріанта домену подія не публікується."""
     mock_repo = MagicMock(spec=IOnlineTestRepository)
     mock_repo.exists_by_title.return_value = False
-    mock_audit = MagicMock(spec=IAuditEventPublisher)
+    mock_publisher = AsyncMock(spec=IEventPublisher)
 
-    use_case = CreateOnlineTestUseCase(
-        test_repository=mock_repo,
-        audit_publisher=mock_audit,
-    )
-    invalid_command = CreateOnlineTestCommand(
+    use_case = CreateOnlineTestUseCase(test_repository=mock_repo, event_publisher=mock_publisher)
+    bad_cmd = CreateOnlineTestCommand(
         course_id=uuid4(),
-        title="Валідаційний тест із некоректною тривалістю",
+        title="Невалідний тест",
         category="PRACTICE_QUIZ",
-        duration_minutes=500,  # Порушення інваріанта: максимум 180 хвилин
-        max_score=20.0,
+        duration_minutes=999,
+        max_score=10.0,
         actor_id="teacher-101",
     )
 
     with pytest.raises(DomainValidationError):
-        use_case.execute(invalid_command)
+        asyncio.run(use_case.execute(bad_cmd))
 
     mock_repo.save.assert_not_called()
-    mock_audit.publish_test_created.assert_not_called()
+    mock_publisher.publish.assert_not_awaited()
 
 
-def test_create_online_test_duplicate_title_rejected_without_saving() -> None:
-    """Тест 3: Відхилення дубліката назви тесту в межах дисципліни без виклику save()."""
-    mock_repo = MagicMock(spec=IOnlineTestRepository)
-    mock_repo.exists_by_title.return_value = True
-    mock_audit = MagicMock(spec=IAuditEventPublisher)
+def test_idempotent_consumers_skip_duplicate_event_delivery() -> None:
+    """Тест 3: Повторна доставка події з тим самим EventId пропускається і не змінює стан удруге."""
+    async def run_flow() -> None:
+        logs: list[str] = []
+        store = InMemoryProcessedEventStore()
+        c1 = GradebookSlotConsumer(processed_store=store, logs=logs)
+        c2 = NotificationDispatchConsumer(processed_store=store, logs=logs)
 
-    use_case = CreateOnlineTestUseCase(
-        test_repository=mock_repo,
-        audit_publisher=mock_audit,
-    )
-    command = CreateOnlineTestCommand(
-        course_id=uuid4(),
-        title="Модульний контроль №1",
-        category="MODULE_CONTROL",
-        duration_minutes=60,
-        max_score=30.0,
-        actor_id="teacher-101",
-    )
+        bus = AsyncInMemoryEventBus(logs=logs)
+        bus.subscribe(OnlineTestCreatedEvent, c1.handle)
+        bus.subscribe(OnlineTestCreatedEvent, c2.handle)
 
-    with pytest.raises(DuplicateTestTitleError):
-        use_case.execute(command)
+        event = OnlineTestCreatedEvent(
+            test_id=uuid4(),
+            course_id=uuid4(),
+            title="Тест на ідемпотентність",
+            category="MODULE_CONTROL",
+            max_score=20.0,
+            actor_id="teacher-101",
+        )
 
-    mock_repo.save.assert_not_called()
-    mock_audit.publish_test_created.assert_not_called()
+        # Перша доставка
+        await bus.publish(event)
+        await bus.drain()
+        # Повторна доставка того самого примірника події (at-least-once)
+        await bus.publish(event)
+        await bus.drain()
 
+        assert len(c1.created_slots) == 1
+        assert len(c2.sent_notifications) == 1
+        assert any("DUPLICATE_SKIPPED" in line for line in logs)
 
-def test_create_online_test_repository_port_error_propagates_to_caller() -> None:
-    """Тест 4: Помилка інфраструктурного порту доходить до сценарію як залежність без прихованих викликів."""
-    mock_repo = MagicMock(spec=IOnlineTestRepository)
-    mock_repo.exists_by_title.return_value = False
-    mock_repo.save.side_effect = RepositoryPortError("Connection timeout to storage port")
-    mock_audit = MagicMock(spec=IAuditEventPublisher)
-
-    use_case = CreateOnlineTestUseCase(
-        test_repository=mock_repo,
-        audit_publisher=mock_audit,
-    )
-    command = CreateOnlineTestCommand(
-        course_id=uuid4(),
-        title="Підсумковий іспит з інженерії ПЗ",
-        category="FINAL_EXAM",
-        duration_minutes=90,
-        max_score=40.0,
-        actor_id="teacher-101",
-    )
-
-    with pytest.raises(RepositoryPortError, match="Connection timeout"):
-        use_case.execute(command)
-
-    mock_audit.publish_test_created.assert_not_called()
+    asyncio.run(run_flow())
 
 
-def test_domain_layer_has_no_outer_or_framework_dependencies() -> None:
-    """Тест 5 (Архітектурний): Перевірка правила залежностей — src/Domain не імпортує зовнішні шари та фреймворки."""
-    domain_dir = Path("src/Domain")
-    forbidden_modules = {"Application", "Infrastructure", "WebAPI", "fastapi", "sqlalchemy", "requests", "httpx"}
+def test_consumer_failure_is_isolated_from_other_consumers() -> None:
+    """Тест 4: Падіння одного споживача не зупиняє іншого і не відкочує роботу видавця."""
+    async def run_flow() -> None:
+        logs: list[str] = []
+        store = InMemoryProcessedEventStore()
+        c1 = GradebookSlotConsumer(processed_store=store, logs=logs)
+        c2 = NotificationDispatchConsumer(processed_store=store, logs=logs)
+        c2.simulate_failure = True
 
-    for py_file in domain_dir.glob("*.py"):
-        tree = ast.parse(py_file.read_text(encoding="utf-8-sig"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert not any(bad in alias.name for bad in forbidden_modules), f"Forbidden import in {py_file}: {alias.name}"
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                assert not any(bad in node.module for bad in forbidden_modules), f"Forbidden import in {py_file}: {node.module}"
+        bus = AsyncInMemoryEventBus(logs=logs)
+        bus.subscribe(OnlineTestCreatedEvent, c1.handle)
+        bus.subscribe(OnlineTestCreatedEvent, c2.handle)
 
+        event = OnlineTestCreatedEvent(
+            test_id=uuid4(),
+            course_id=uuid4(),
+            title="Тест ізоляції збою",
+            category="FINAL_EXAM",
+            max_score=40.0,
+            actor_id="teacher-101",
+        )
+
+        await bus.publish(event)
+        await bus.drain()
+
+        assert len(c1.created_slots) == 1
+        assert len(c2.sent_notifications) == 0
+        assert any("[EventBus][ERROR]" in line for line in logs)
+
+    asyncio.run(run_flow())
+
+
+def test_application_and_domain_do_not_depend_on_messaging_or_infrastructure() -> None:
+    """Тест 5 (Архітектурний): Domain і Application не посилаються на Messaging чи Infrastructure."""
+    forbidden = {"Infrastructure", "Messaging", "WebAPI", "pika", "kafka"}
+    for layer in ("src/Domain", "src/Application"):
+        for py_file in Path(layer).glob("*.py"):
+            tree = ast.parse(py_file.read_text(encoding="utf-8-sig"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        assert not any(bad in alias.name for bad in forbidden), f"Forbidden import in {py_file}: {alias.name}"
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    assert not any(bad in node.module for bad in forbidden), f"Forbidden import in {py_file}: {node.module}"

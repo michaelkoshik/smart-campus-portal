@@ -1,37 +1,36 @@
 ﻿from src.Application.dto import CreateOnlineTestCommand, OnlineTestResultDTO
+from src.Application.ports import IEventPublisher
 from src.Domain.entities import OnlineTest, TestCategory
 from src.Domain.exceptions import DomainValidationError, DuplicateTestTitleError
-from src.Domain.ports import IAuditEventPublisher, IOnlineTestRepository
+from src.Domain.ports import IOnlineTestRepository
+from src.Events.domain_events import OnlineTestCreatedEvent
 
 
 class CreateOnlineTestUseCase:
     """
     Сценарій використання (Use Case): Створення нового онлайн-тесту.
-    Залежності передаються виключно через конструктор (Dependency Injection).
+    Після збереження сутності публікує подію OnlineTestCreatedEvent через абстрактний порт IEventPublisher.
     """
 
     def __init__(
         self,
         test_repository: IOnlineTestRepository,
-        audit_publisher: IAuditEventPublisher,
+        event_publisher: IEventPublisher,
     ) -> None:
         self._test_repository = test_repository
-        self._audit_publisher = audit_publisher
+        self._event_publisher = event_publisher
 
-    def execute(self, command: CreateOnlineTestCommand) -> OnlineTestResultDTO:
-        # 1. Валідація категорії тесту
+    async def execute(self, command: CreateOnlineTestCommand) -> OnlineTestResultDTO:
         try:
             category_enum = TestCategory(command.category)
         except ValueError as exc:
             raise DomainValidationError(f"Невідома категорія тесту: {command.category}") from exc
 
-        # 2. Перевірка бізнес-правила унікальності назви тесту в межах дисципліни
         if self._test_repository.exists_by_title(command.course_id, command.title.strip()):
             raise DuplicateTestTitleError(
                 f"Тест із назвою '{command.title.strip()}' вже існує в межах обраної дисципліни."
             )
 
-        # 3. Створення доменної сутності з перевіркою інваріантів Value Objects
         online_test = OnlineTest.create(
             course_id=command.course_id,
             title=command.title,
@@ -40,11 +39,18 @@ class CreateOnlineTestUseCase:
             max_score=command.max_score,
         )
 
-        # 4. Збереження через абстрактний порт репозиторію
         self._test_repository.save(online_test)
 
-        # 5. Фіксація події в аудиті через порт публікації
-        self._audit_publisher.publish_test_created(online_test, actor_id=command.actor_id)
+        # Публікація незмінної події у минулому часі через порт (без знання транспорту)
+        event = OnlineTestCreatedEvent(
+            test_id=online_test.id,
+            course_id=online_test.course_id,
+            title=online_test.title,
+            category=online_test.category.value,
+            max_score=online_test.max_score.value,
+            actor_id=command.actor_id,
+        )
+        await self._event_publisher.publish(event)
 
         return OnlineTestResultDTO(
             id=online_test.id,

@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package smartcampus.assessment.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option csharp_namespace = "SmartCampus.Assessment.V1";
+option go_package = "github.com/michaelkoshik/smart-campus-portal/api/generated/assessment/v1;assessmentv1";
+
+// Внутрішній високопродуктивний gRPC-сервіс міжмодульної та міжсервісної взаємодії
+// між Assessment Module, Gradebook Module та фоновим Notification Worker
+service AssessmentGradebookSyncService {
+  // Unary RPC 1: Атомарна синхронізація результату завершеного тесту в електронний журнал
+  rpc SyncTestAttemptGrade (SyncTestGradeRequest) returns (SyncTestGradeResponse);
+
+  // Unary RPC 2: Отримання зведеного рейтингу та статистики тестування студента по дисципліні
+  rpc GetStudentCourseSummary (CourseSummaryRequest) returns (CourseSummaryResponse);
+
+  // Server Streaming RPC: Потокова передача подій статусів спроб тестування у реальному часі
+  rpc StreamAttemptProgress (StreamAttemptRequest) returns (stream AttemptProgressEvent);
+}
+
+// Перелік статусів спроби тестування (обов'язкове значення за замовчуванням = 0 у Proto3)
+enum AttemptSyncStatus {
+  ATTEMPT_SYNC_STATUS_UNSPECIFIED = 0;
+  ATTEMPT_SYNC_STATUS_IN_PROGRESS = 1;
+  ATTEMPT_SYNC_STATUS_COMPLETED = 2;
+  ATTEMPT_SYNC_STATUS_GRADED = 3;
+  ATTEMPT_SYNC_STATUS_EXPIRED = 4;
+}
+
+// Вкладена метаінформація про аудит операції
+message AuditMetadata {
+  string trace_id = 1;
+  string triggered_by_user_id = 2;
+  string source_service = 3;
+  google.protobuf.Timestamp recorded_at = 4;
+}
+
+// Запит на синхронізацію оцінки за тест у журнал
+message SyncTestGradeRequest {
+  string attempt_id = 1;
+  string test_id = 2;
+  string student_id = 3;
+  string course_id = 4;
+  double earned_points = 5;
+  double max_points = 6;
+  int64 duration_seconds = 7;
+  bool is_auto_submitted = 8;
+  AttemptSyncStatus status = 9;
+  AuditMetadata audit = 10;
+}
+
+// Відповідь про результат синхронізації в електронному журналі
+message SyncTestGradeResponse {
+  bool success = 1;
+  string grade_record_id = 2;
+  double updated_course_total_points = 3;
+  google.protobuf.Timestamp synced_at = 4;
+}
+
+// Запит зведеного рейтингу студента
+message CourseSummaryRequest {
+  string student_id = 1;
+  string course_id = 2;
+}
+
+// Відповідь зі зведеною інформацією про пройдені тести студента
+message CourseSummaryResponse {
+  string student_id = 1;
+  string course_id = 2;
+  int64 completed_tests_count = 3;
+  double total_earned_points = 4;
+  double max_possible_points = 5;
+  bool is_passing_threshold_met = 6;
+
+  // Вкладене повідомлення з деталями окремої спроби
+  message TestResultItem {
+    string test_id = 1;
+    string test_title = 2;
+    double score = 3;
+    AttemptSyncStatus status = 4;
+    google.protobuf.Timestamp completed_at = 5;
+  }
+
+  repeated TestResultItem results = 7;
+}
+
+// Запит на підписку потоку прогресу тестування (Server Streaming)
+message StreamAttemptRequest {
+  string test_id = 1;
+  string group_code = 2;
+}
+
+// Подія потоку прогресу спроби тестування
+message AttemptProgressEvent {
+  string attempt_id = 1;
+  string student_id = 2;
+  string student_full_name = 3;
+  AttemptSyncStatus status = 4;
+  int64 answered_questions = 5;
+  int64 total_questions = 6;
+  double current_score = 7;
+  google.protobuf.Timestamp event_timestamp = 8;
+}

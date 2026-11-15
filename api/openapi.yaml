@@ -1,0 +1,494 @@
+openapi: 3.0.3
+info:
+  title: Smart Campus & Educational Portal — Assessment & Gradebook REST API
+  version: 1.0.0
+  description: |
+    Публічний REST API контракту модулів онлайн-тестування (Assessment Module) та електронного журналу (Gradebook Module),
+    спроєктований за парадигмою Contract-First (Milestone 3).
+    Усі відповіді про помилки відповідають стандарту RFC 7807 (application/problem+json).
+  contact:
+    name: Кошик Михайло Сергійович (гр. 2ПРс)
+    email: michaelkoshik@users.noreply.github.com
+
+servers:
+  - url: http://localhost:4010/api/v1
+    description: Local Prism Mock Server
+  - url: https://campus.kntu.edu.ua/api/v1
+    description: Production API Gateway
+
+tags:
+  - name: Tests
+    description: Операції управління онлайн-тестами та спробами тестування
+  - name: Gradebook
+    description: Операції електронного журналу успішності
+
+security:
+  - BearerAuth: []
+
+paths:
+  /tests:
+    get:
+      tags:
+        - Tests
+      summary: Отримати список онлайн-тестів із фільтрацією та пагінацією
+      operationId: listOnlineTests
+      parameters:
+        - name: courseId
+          in: query
+          description: Фільтр за ідентифікатором навчальної дисципліни
+          required: false
+          schema:
+            type: string
+            format: uuid
+            example: "550e8400-e29b-41d4-a716-446655440000"
+        - name: isPublished
+          in: query
+          description: Фільтр за статусом публікації тесту
+          required: false
+          schema:
+            type: boolean
+            default: true
+        - name: limit
+          in: query
+          description: Максимальна кількість елементів на сторінку (1..100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          description: Курсор для курсорної пагінації наступної сторінки
+          required: false
+          schema:
+            type: string
+            example: "eyJpZCI6IjEwMiJ9"
+      responses:
+        "200":
+          description: Успішне отримання списку тестів із метаданими пагінації
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedTestsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+
+    post:
+      tags:
+        - Tests
+      summary: Створити новий онлайн-тест (для викладача)
+      operationId: createOnlineTest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOnlineTestRequest"
+      responses:
+        "201":
+          description: Онлайн-тест успішно створено
+          headers:
+            Location:
+              description: URI створеного ресурсу тесту
+              schema:
+                type: string
+                example: "/api/v1/tests/7c9e6679-7425-40de-944b-e07fc1f90ae7"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnlineTestDTO"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntityError"
+
+  /tests/{testId}:
+    parameters:
+      - name: testId
+        in: path
+        required: true
+        description: Унікальний ідентифікатор онлайн-тесту (UUID)
+        schema:
+          type: string
+          format: uuid
+          example: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+
+    get:
+      tags:
+        - Tests
+      summary: Отримати детальну інформацію про онлайн-тест за ID
+      operationId: getOnlineTestById
+      responses:
+        "200":
+          description: Деталі онлайн-тесту знайдено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnlineTestDTO"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+    patch:
+      tags:
+        - Tests
+      summary: Частково оновити параметри або статус публікації тесту
+      operationId: updateOnlineTest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOnlineTestRequest"
+      responses:
+        "200":
+          description: Параметри тесту успішно оновлено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OnlineTestDTO"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntityError"
+
+    delete:
+      tags:
+        - Tests
+      summary: Видалити неопублікований онлайн-тест (чернетку)
+      operationId: deleteOnlineTest
+      responses:
+        "204":
+          description: Онлайн-тест успішно видалено (тіло відповіді відсутнє)
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+
+  /attempts/{attemptId}/draft:
+    parameters:
+      - name: attemptId
+        in: path
+        required: true
+        description: Ідентифікатор активної спроби тестування
+        schema:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    patch:
+      tags:
+        - Tests
+      summary: Автозбереження чернетки відповіді студента (Redis Buffer)
+      operationId: saveAttemptDraftAnswer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveDraftAnswerRequest"
+      responses:
+        "200":
+          description: Чернетку відповіді успішно збережено у буфері
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DraftSavedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "401":
+          $ref: "#/components/responses/UnauthorizedError"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntityError"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequestError:
+      description: Некоректний синтаксис або параметри запиту (RFC 7807)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "https://campus.kntu.edu.ua/probs/bad-request"
+            title: "Bad Request"
+            status: 400
+            detail: "Параметр limit повинен бути цілим числом у діапазоні від 1 до 100."
+            instance: "/api/v1/tests?limit=500"
+
+    UnauthorizedError:
+      description: Відсутній або невалідний JWT токен доступу (RFC 7807)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "https://campus.kntu.edu.ua/probs/unauthorized"
+            title: "Unauthorized"
+            status: 401
+            detail: "Термін дії JWT-токена минув або підпис RS256 не пройшов перевірку."
+            instance: "/api/v1/tests"
+
+    NotFoundError:
+      description: Запитуваний ресурс не знайдено (RFC 7807)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "https://campus.kntu.edu.ua/probs/not-found"
+            title: "Resource Not Found"
+            status: 404
+            detail: "Онлайн-тест із вказаним ідентифікатором не існує."
+            instance: "/api/v1/tests/00000000-0000-0000-0000-000000000000"
+
+    UnprocessableEntityError:
+      description: Помилка бізнес-валідації вхідних даних DTO (RFC 7807)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+          example:
+            type: "https://campus.kntu.edu.ua/probs/validation-error"
+            title: "Unprocessable Entity"
+            status: 422
+            detail: "Некоректні дані при створенні або оновленні сутності."
+            instance: "/api/v1/tests"
+            errors:
+              - field: "durationMinutes"
+                message: "Тривалість тесту має бути від 5 до 180 хвилин."
+
+  schemas:
+    ProblemDetails:
+      type: object
+      description: Стандартна структура помилки HTTP API згідно з RFC 7807
+      required:
+        - type
+        - title
+        - status
+        - detail
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI-ідентифікатор типу помилки
+          example: "https://campus.kntu.edu.ua/probs/validation-error"
+        title:
+          type: string
+          description: Короткий людиночитабельний заголовок помилки
+          example: "Unprocessable Entity"
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+          description: HTTP-код статусу помилки
+          example: 422
+        detail:
+          type: string
+          description: Детальний опис конкретної причини виникнення помилки
+          example: "Поле title не може бути порожнім."
+        instance:
+          type: string
+          description: Шлях запиту, під час якого виникла помилка
+          example: "/api/v1/tests"
+        errors:
+          type: array
+          description: Опціональний список помилок валідації окремих полів
+          items:
+            type: object
+            required:
+              - field
+              - message
+            properties:
+              field:
+                type: string
+                example: "maxScore"
+              message:
+                type: string
+                example: "Максимальний бал має бути не менше 1."
+
+    TestCategoryEnum:
+      type: string
+      enum:
+        - MODULE_CONTROL
+        - PRACTICE_QUIZ
+        - FINAL_EXAM
+      example: "MODULE_CONTROL"
+
+    CreateOnlineTestRequest:
+      type: object
+      required:
+        - courseId
+        - title
+        - category
+        - durationMinutes
+        - maxScore
+      properties:
+        courseId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        title:
+          type: string
+          minLength: 5
+          maxLength: 150
+          example: "Модульний контроль №1: Архітектурні стилі та шаблони"
+        category:
+          $ref: "#/components/schemas/TestCategoryEnum"
+        durationMinutes:
+          type: integer
+          minimum: 5
+          maximum: 180
+          example: 45
+        maxScore:
+          type: number
+          format: float
+          minimum: 1
+          maximum: 100
+          example: 25.0
+
+    UpdateOnlineTestRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 5
+          maxLength: 150
+          example: "Модульний контроль №1 (оновлений)"
+        durationMinutes:
+          type: integer
+          minimum: 5
+          maximum: 180
+          example: 60
+        isPublished:
+          type: boolean
+          example: true
+
+    OnlineTestDTO:
+      type: object
+      required:
+        - id
+        - courseId
+        - title
+        - category
+        - durationMinutes
+        - maxScore
+        - isPublished
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+        courseId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        title:
+          type: string
+          example: "Модульний контроль №1: Архітектурні стилі та шаблони"
+        category:
+          $ref: "#/components/schemas/TestCategoryEnum"
+        durationMinutes:
+          type: integer
+          minimum: 5
+          maximum: 180
+          example: 45
+        maxScore:
+          type: number
+          format: float
+          minimum: 1
+          maximum: 100
+          example: 25.0
+        isPublished:
+          type: boolean
+          example: false
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-11-16T09:00:00Z"
+
+    PaginationMeta:
+      type: object
+      required:
+        - limit
+        - hasNextPage
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          example: 20
+        nextCursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6IjEyMCJ9"
+        hasNextPage:
+          type: boolean
+          example: true
+
+    PaginatedTestsResponse:
+      type: object
+      required:
+        - items
+        - pagination
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OnlineTestDTO"
+        pagination:
+          $ref: "#/components/schemas/PaginationMeta"
+
+    SaveDraftAnswerRequest:
+      type: object
+      required:
+        - questionId
+        - selectedOptionIds
+      properties:
+        questionId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        selectedOptionIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          example: ["opt_2"]
+
+    DraftSavedResponse:
+      type: object
+      required:
+        - attemptId
+        - questionId
+        - savedAt
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        questionId:
+          type: string
+          format: uuid
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+        savedAt:
+          type: string
+          format: date-time
+          example: "2026-11-16T09:12:40Z"

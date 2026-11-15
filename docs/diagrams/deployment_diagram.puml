@@ -1,0 +1,70 @@
+﻿@startuml
+title UML Deployment Diagram — Smart Campus & Educational Portal (аріант 3)
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "DejaVu Sans"
+skinparam node {
+  BackgroundColor #F8FAFC
+  BorderColor #1E3A8A
+}
+skinparam artifact {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+}
+
+node "Client Workstation / Mobile Device\n<<device>>" as client_dev {
+  node "Web Browser (Chrome / Edge)\n<<executionEnvironment>>" as browser {
+    artifact "SmartCampus SPA\n<<artifact>>\n(React 19 Bundle)" as spa
+  }
+}
+
+node "University Cloud Application Server (Ubuntu 24.04 LTS)\n<<device>>" as app_server {
+  node "Docker Engine (docker-compose.yml)\n<<executionEnvironment>>" as docker_env {
+
+    node "api-gateway\n<<executionEnvironment>>" as gw_node {
+      artifact "nginx:1.27-alpine\n<<artifact>>\nnginx/nginx.conf" as nginx_art
+    }
+
+    node "smart-campus-api\n<<executionEnvironment>>" as api_node {
+      artifact "smart-campus-api:1.0.0\n<<artifact>>\nClean Architecture Core (src/)" as api_art
+    }
+
+    node "eda-event-worker\n<<executionEnvironment>>" as worker_node {
+      artifact "smart-campus-api:1.0.0\n<<artifact>>\nIdempotent Consumers (demo_eda.py)" as worker_art
+    }
+
+    node "postgres-db\n<<executionEnvironment>>" as pg_node {
+      artifact "postgres:16-alpine\n<<artifact>>\nsmart_campus DB (pg_data)" as pg_art
+    }
+
+    node "redis-cache\n<<executionEnvironment>>" as redis_node {
+      artifact "redis:7-alpine\n<<artifact>>\nAttempt Drafts & Idempotency Store" as redis_art
+    }
+
+    node "rabbitmq-broker\n<<executionEnvironment>>" as mq_node {
+      artifact "rabbitmq:3.13-management\n<<artifact>>\nExchange: campus.events" as mq_art
+    }
+  }
+}
+
+node "University SSO Server\n<<device>>" as sso_ext {
+  node "Keycloak 26 IdP\n<<executionEnvironment>>" as kc_env {
+    artifact "OIDC / OAuth 2.0 Realm\n<<artifact>>" as kc_art
+  }
+}
+
+node "External Notification Gateways\n<<device>>" as ext_notif {
+  artifact "SMTP / Telegram Bot API\n<<artifact>>" as notif_art
+}
+
+spa --> nginx_art : HTTPS / TLS 1.3 (Port 443)\nREST JSON + JWT
+spa --> kc_art : HTTPS / OIDC (Port 443)\nAuthorization Code + PKCE
+nginx_art --> api_art : HTTP / REST (Port 8000)\nReverse Proxy
+api_art --> kc_art : HTTPS / JWKS (Port 443)\nToken Introspection
+api_art --> pg_art : TCP / PostgreSQL (Port 5432)\nACID Persistence
+api_art --> redis_art : TCP / RESP (Port 6379)\nAuto-save Drafts
+api_art --> mq_art : AMQP 0-9-1 (Port 5672)\nPublish Domain Events
+mq_art --> worker_art : AMQP 0-9-1 (Port 5672)\nConsume Events (At-Least-Once)
+worker_art --> pg_art : TCP / PostgreSQL (Port 5432)\nUpdate Gradebook Slots
+worker_art --> notif_art : HTTPS / TLS 1.3 (Port 443)\nPush Student Alerts
+@enduml

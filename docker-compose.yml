@@ -1,0 +1,94 @@
+﻿version: "3.9"
+
+services:
+  api-gateway:
+    image: nginx:1.27-alpine
+    container_name: smart-campus-gateway
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - smart-campus-api
+    networks:
+      - campus-net
+
+  smart-campus-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: smart-campus-api:1.0.0
+    container_name: smart-campus-api
+    environment:
+      - DB_HOST=postgres-db
+      - DB_PORT=5432
+      - REDIS_HOST=redis-cache
+      - REDIS_PORT=6379
+      - BROKER_URL=amqp://guest:guest@rabbitmq-broker:5672/
+      - KEYCLOAK_URL=https://sso.kntu.edu.ua/realms/campus
+    expose:
+      - "8000"
+    depends_on:
+      - postgres-db
+      - redis-cache
+      - rabbitmq-broker
+    networks:
+      - campus-net
+
+  eda-event-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: smart-campus-api:1.0.0
+    container_name: smart-campus-eda-worker
+    command: ["python", "demo_eda.py"]
+    environment:
+      - DB_HOST=postgres-db
+      - BROKER_URL=amqp://guest:guest@rabbitmq-broker:5672/
+    depends_on:
+      - rabbitmq-broker
+      - postgres-db
+    networks:
+      - campus-net
+
+  postgres-db:
+    image: postgres:16-alpine
+    container_name: smart-campus-postgres
+    environment:
+      POSTGRES_DB: smart_campus
+      POSTGRES_USER: campus_admin
+      POSTGRES_PASSWORD: campus_secret_password
+    expose:
+      - "5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - campus-net
+
+  redis-cache:
+    image: redis:7-alpine
+    container_name: smart-campus-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - campus-net
+
+  rabbitmq-broker:
+    image: rabbitmq:3.13-management-alpine
+    container_name: smart-campus-rabbitmq
+    expose:
+      - "5672"
+      - "15672"
+    networks:
+      - campus-net
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  campus-net:
+    driver: bridge
